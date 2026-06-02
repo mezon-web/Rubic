@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>METALルービック</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <canvas id="scene" aria-label="3D Rubik cube scene"></canvas>
+
+    <main class="app-shell" aria-label="METALルービック">
+      <section class="topbar" aria-label="Game status">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>METALルービック</span>
+        </div>
+        <div class="hint-strip" aria-label="操作説明">
+          <span><strong>1本指 / 左D</strong>段回転</span>
+          <span><strong>2本指 / 右D</strong>視点</span>
+          <span><strong>ひねり / 中D</strong>ロール</span>
+          <span><strong>ピンチ / ホイール</strong>ズーム</span>
+        </div>
+        <div class="stats">
+          <span id="status">完成</span>
+          <span><strong id="moves">0</strong> 手</span>
+          <span id="timer">00:00</span>
+        </div>
+      </section>
+
+      <section class="controls" aria-label="Cube controls">
+        <div class="action-row" aria-label="Game actions">
+          <button type="button" id="scramble">シャッフル</button>
+          <button type="button" id="undo">戻す</button>
+          <button type="button" id="reset">リセット</button>
+        </div>
+      </section>
+
+      <section class="settings" aria-label="表示設定">
+        <span class="setting-label">光沢</span>
+        <div class="segmented" role="group" aria-label="キューブの光沢">
+          <button type="button" id="gloss-on" aria-pressed="false">あり</button>
+          <button type="button" id="gloss-off" aria-pressed="true">なし</button>
+        </div>
+      </section>
+    </main>
+
+    <div id="unsupported" hidden>
+      <p>このブラウザでは WebGL を利用できません。</p>
+    </div>
+  </body>
+</html>
