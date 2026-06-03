@@ -575,7 +575,7 @@
     const dSpan = current.span - touchCameraGesture.span;
     const dAngle = wrapDeltaAngle(current.angle - touchCameraGesture.angle);
     orbitCamera(dx, dy);
-    rollCamera(dAngle);
+    rollCamera(-dAngle);
     distance = clamp(distance - dSpan * 0.012, 4.8, 12.8);
     touchCameraGesture = current;
   }

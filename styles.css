@@ -272,6 +272,12 @@ button:disabled {
   line-height: 1;
 }
 
+@media (hover: none) and (pointer: coarse) {
+  .hint-strip .mouse-label {
+    display: none;
+  }
+}
+
 .action-row {
   display: grid;
   gap: 8px;
