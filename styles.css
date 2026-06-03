@@ -192,7 +192,7 @@ button:disabled {
   grid-row: 2;
   justify-self: end;
   padding: 10px;
-  width: min(350px, 100%);
+  width: min(430px, 100%);
 }
 
 .settings {
@@ -275,7 +275,7 @@ button:disabled {
 .action-row {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
 }
 
 #scramble {
@@ -291,6 +291,15 @@ button:disabled {
     linear-gradient(120deg, transparent 0 30%, rgba(255, 255, 255, 0.36) 48%, transparent 66%),
     linear-gradient(180deg, rgba(255, 238, 182, 0.46), rgba(182, 123, 40, 0.38)),
     rgba(42, 34, 23, 0.95);
+}
+
+#god {
+  background:
+    radial-gradient(circle at 50% 18%, rgba(255, 255, 255, 0.42), transparent 32%),
+    linear-gradient(180deg, rgba(255, 230, 132, 0.28), rgba(105, 73, 22, 0.38)),
+    rgba(31, 28, 20, 0.94);
+  border-color: rgba(255, 221, 126, 0.58);
+  color: #fff5bf;
 }
 
 #unsupported {

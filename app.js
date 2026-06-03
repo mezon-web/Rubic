@@ -7,6 +7,7 @@
   const movesEl = document.getElementById("moves");
   const timerEl = document.getElementById("timer");
   const scrambleButton = document.getElementById("scramble");
+  const godButton = document.getElementById("god");
   const undoButton = document.getElementById("undo");
   const resetButton = document.getElementById("reset");
   const glossOnButton = document.getElementById("gloss-on");
@@ -43,6 +44,17 @@
     { normal: [0, 0, 1], color: COLORS.green, key: "z+" },
     { normal: [0, 0, -1], color: COLORS.blue, key: "z-" },
   ];
+
+  const STICKER_NORMALS = Object.fromEntries(FACE_STICKERS.map((face) => [face.key, face.normal]));
+  const STICKER_LETTERS = {
+    "x+": "R",
+    "x-": "L",
+    "y+": "U",
+    "y-": "D",
+    "z+": "F",
+    "z-": "B",
+  };
+  const FACE_OFFSETS = { U: 0, R: 9, F: 18, D: 27, L: 36, B: 45 };
 
   const MOVE_DEFS = {
     U: { axis: "y", layer: 1, sign: -1 },
@@ -257,8 +269,14 @@
   let queue = [];
   let activeTurn = null;
   let history = [];
+  let rescueStack = [];
   let moveCount = 0;
   let scramblingCount = 0;
+  let solverBusy = false;
+  let solverInitialized = false;
+  let solverMode = "idle";
+  let assistPlan = [];
+  let assistPlanKey = "";
   let timerStart = 0;
   let elapsedBeforeStart = 0;
   let timerRunning = false;
@@ -304,14 +322,21 @@
       lastMove,
       gloss: glossEnabled,
       touches: touchPointers.size,
+      godEnabled: Boolean(godButton && !godButton.disabled),
+      solverMode,
+      assistPlanLength: assistPlan.length,
+      rescueDepth: rescueStack.length,
     }),
     move: (notation) => playMove(notation),
+    layer: (axis, layer, sign, turns = 1) => playParsedMove({ axis, layer, sign, turns }),
+    god: () => requestGodMove(),
     reset,
     setGloss: setGlossEnabled,
   };
 
   function bindControls() {
     scrambleButton.addEventListener("click", scramble);
+    godButton.addEventListener("click", () => requestGodMove());
     undoButton.addEventListener("click", undo);
     resetButton.addEventListener("click", reset);
     glossOnButton.addEventListener("click", () => setGlossEnabled(true));
@@ -602,11 +627,19 @@
     playParsedMove(move);
   }
 
-  function playParsedMove(move) {
+  function playParsedMove(move, options = {}) {
     if (scramblingCount > 0) return;
     if (!timerRunning && !isSolved()) startTimer();
     lastMove = pickMoveFields(move);
-    enqueueMove({ ...move, record: true, duration: TURN_DURATION });
+    if (options.invalidateAssist !== false) invalidateAssistPlan();
+    enqueueMove({
+      ...move,
+      record: true,
+      trackRescue: true,
+      rescueBefore: cloneMoveList(rescueStack),
+      duration: options.duration || TURN_DURATION,
+      assist: options.assist || false,
+    });
   }
 
   function updateCubeGesture(event) {
@@ -761,9 +794,11 @@
   }
 
   function scramble() {
-    if (activeTurn || queue.length) return;
+    if (activeTurn || queue.length || solverBusy) return;
     resetTimer();
     lastMove = null;
+    rescueStack = [];
+    invalidateAssistPlan();
     setStatus("シャッフル中");
     const faces = Object.keys(MOVE_DEFS);
     let previous = "";
@@ -776,6 +811,7 @@
       scrambleMoves.push({
         ...faceMove(face, Math.random() > 0.5 ? 1 : -1),
         record: false,
+        trackRescue: true,
         duration: SCRAMBLE_DURATION,
         scramble: true,
       });
@@ -786,10 +822,17 @@
   }
 
   function undo() {
-    if (scramblingCount > 0 || activeTurn || queue.length || history.length === 0) return;
-    const move = history.pop();
+    if (scramblingCount > 0 || activeTurn || queue.length || solverBusy || history.length === 0) return;
+    const entry = history.pop();
     moveCount = Math.max(0, moveCount - 1);
-    enqueueMove({ ...move, record: false, duration: TURN_DURATION });
+    invalidateAssistPlan();
+    enqueueMove({
+      ...entry.undoMove,
+      record: false,
+      trackRescue: false,
+      restoreRescue: entry.rescueBefore,
+      duration: TURN_DURATION,
+    });
     updateHud();
   }
 
@@ -798,8 +841,11 @@
     queue = [];
     activeTurn = null;
     history = [];
+    rescueStack = [];
     moveCount = 0;
     scramblingCount = 0;
+    solverBusy = false;
+    invalidateAssistPlan();
     resetTimer();
     lastMove = null;
     setStatus("完成");
@@ -816,6 +862,7 @@
       axis: def.axis,
       layer: def.layer,
       sign: def.sign * dir,
+      turns: 1,
     };
   }
 
@@ -824,13 +871,128 @@
       axis: move.axis,
       layer: move.layer,
       sign: move.sign,
+      turns: move.turns || 1,
     };
   }
 
   function parseMove(notation) {
     const face = notation.charAt(0).toUpperCase();
     if (!MOVE_DEFS[face]) return null;
-    return faceMove(face, notation.includes("'") ? -1 : 1);
+    const move = faceMove(face, notation.includes("'") ? -1 : 1);
+    move.turns = notation.includes("2") ? 2 : 1;
+    return move;
+  }
+
+  function requestGodMove() {
+    if (solverBusy || scramblingCount > 0 || activeTurn || queue.length || isSolved()) {
+      return Promise.resolve(false);
+    }
+
+    solverBusy = true;
+    setStatus("解析中");
+    updateHud();
+
+    return new Promise((resolve) => {
+      window.setTimeout(() => {
+        try {
+          const assist = nextGodMove();
+          if (!assist) {
+            solverMode = rescueStack.length > 0 ? "error" : "idle";
+            setStatus(rescueStack.length > 0 ? "解析失敗" : "完成");
+            resolve(false);
+            return;
+          }
+
+          solverMode = assist.mode;
+          lastMove = pickMoveFields(assist.move);
+          playParsedMove(assist.move, {
+            assist: assist.mode,
+            duration: assist.move.turns === 2 ? TURN_DURATION * 1.25 : TURN_DURATION,
+            invalidateAssist: false,
+          });
+          resolve(true);
+        } catch (error) {
+          console.error(error);
+          solverMode = "error";
+          setStatus("解析失敗");
+          resolve(false);
+        } finally {
+          solverBusy = false;
+          updateHud();
+        }
+      }, 0);
+    });
+  }
+
+  function nextGodMove() {
+    const rescueMove = rescueStack.length ? cloneMove(rescueStack[rescueStack.length - 1]) : null;
+    const kociembaMove = nextKociembaMove();
+
+    if (kociembaMove) return { mode: "kociemba", move: kociembaMove };
+    invalidateAssistPlan();
+    return rescueMove ? { mode: "rescue", move: rescueMove } : null;
+  }
+
+  function nextKociembaMove() {
+    const facelets = faceletStringFromCubies();
+    if (!facelets) return null;
+
+    if (assistPlanKey === facelets && assistPlan.length > 0) {
+      return cloneMove(assistPlan.shift());
+    }
+
+    const CubeSolver = window.Cube;
+    if (!CubeSolver || typeof CubeSolver.fromString !== "function") return null;
+
+    ensureSolverReady(CubeSolver);
+
+    let solution = "";
+    try {
+      solution = solveKociembaFacelets(CubeSolver, facelets).trim();
+      if (!solution) return isSolved() ? null : null;
+
+      const verification = CubeSolver.fromString(facelets);
+      verification.move(solution);
+      if (!verification.isSolved()) return null;
+    } catch (error) {
+      console.warn("Kociemba solver fallback:", error);
+      return null;
+    }
+
+    const moves = solution
+      .split(/\s+/)
+      .map(parseMove)
+      .filter(Boolean);
+    if (moves.length === 0) return null;
+
+    assistPlan = moves.slice(1).map(cloneMove);
+    assistPlanKey = "";
+    return moves[0];
+  }
+
+  function solveKociembaFacelets(CubeSolver, facelets) {
+    const shallowLimit = Math.min(6, Math.max(1, rescueStack.length || 6));
+    for (let depth = 1; depth <= shallowLimit; depth += 1) {
+      try {
+        const cube = CubeSolver.fromString(facelets);
+        if (!isValidCubeJsCube(cube)) return "";
+        return cube.solve(depth);
+      } catch (_) {
+        // Try a deeper exact bound before falling back to the normal two-phase depth.
+      }
+    }
+
+    const cube = CubeSolver.fromString(facelets);
+    if (!isValidCubeJsCube(cube)) return "";
+    return cube.solve(22);
+  }
+
+  function ensureSolverReady(CubeSolver) {
+    if (solverInitialized) return;
+    if (!CubeSolver._metalRubikTablesReady && typeof CubeSolver.initSolver === "function") {
+      CubeSolver.initSolver();
+    }
+    solverInitialized = true;
   }
 
   function frame(now) {
@@ -857,9 +1019,18 @@
     if (activeTurn.elapsed >= activeTurn.duration) {
       commitTurn(activeTurn);
 
+      if (activeTurn.restoreRescue) {
+        rescueStack = cloneMoveList(activeTurn.restoreRescue);
+      } else if (activeTurn.trackRescue) {
+        updateRescueStack(activeTurn);
+      }
+
       if (activeTurn.record) {
         moveCount += 1;
-        history.push(invertMove(activeTurn));
+        history.push({
+          undoMove: invertMove(activeTurn),
+          rescueBefore: cloneMoveList(activeTurn.rescueBefore || []),
+        });
       }
 
       if (activeTurn.scramble) {
@@ -870,8 +1041,15 @@
           setStatus("準備完了");
         }
       } else {
-        setStatus(isSolved() ? "完成" : "プレイ中");
-        if (isSolved()) stopTimer();
+        const solvedNow = isSolved();
+        setStatus(solvedNow ? "完成" : "プレイ中");
+        if (solvedNow) {
+          stopTimer();
+          rescueStack = [];
+          invalidateAssistPlan();
+        } else if (activeTurn.assist === "kociemba" && assistPlan.length > 0) {
+          assistPlanKey = faceletStringFromCubies() || "";
+        }
       }
 
       activeTurn = null;
@@ -880,19 +1058,24 @@
 
   function commitTurn(turn) {
     const axisIndex = AXIS_INDEX[turn.axis];
+    const turns = turn.turns || 1;
 
     cubies.forEach((cubie) => {
       if (cubie.pos[axisIndex] !== turn.layer) return;
-      cubie.pos = rotateVector90(cubie.pos, turn.axis, turn.sign);
-      cubie.basis = rotateBasis90(cubie.basis, turn.axis, turn.sign);
+      for (let i = 0; i < turns; i += 1) {
+        cubie.pos = rotateVector90(cubie.pos, turn.axis, turn.sign);
+        cubie.basis = rotateBasis90(cubie.basis, turn.axis, turn.sign);
+      }
     });
   }
 
   function invertMove(move) {
+    const turns = move.turns || 1;
     return {
       axis: move.axis,
       layer: move.layer,
-      sign: -move.sign,
+      sign: turns === 2 ? move.sign : -move.sign,
+      turns,
       record: false,
       duration: TURN_DURATION,
     };
@@ -965,7 +1148,7 @@
         const turnAmount = easeInOutCubic(
           clamp(activeTurn.elapsed / activeTurn.duration, 0, 1),
         );
-        const angle = activeTurn.sign * turnAmount * Math.PI * 0.5;
+        const angle = activeTurn.sign * (activeTurn.turns || 1) * turnAmount * Math.PI * 0.5;
         pos = rotateVector(pos, activeTurn.axis, angle);
         basis = rotateBasis(basis, activeTurn.axis, angle);
       }
@@ -1026,12 +1209,171 @@
   }
 
   function isSolved() {
-    return cubies.every((cubie) => {
-      return (
-        cubie.home.every((value, index) => value === cubie.pos[index]) &&
-        basisEquals(cubie.basis, identityBasis())
-      );
+    const facelets = faceletStringFromCubies();
+    return Boolean(facelets && areFacesUniform(facelets));
+  }
+
+  function updateRescueStack(move) {
+    const nextMove = cloneMove(move);
+    const top = rescueStack[rescueStack.length - 1];
+    if (top && movesEquivalent(top, nextMove)) {
+      rescueStack.pop();
+      return;
+    }
+
+    const inverse = invertMove(nextMove);
+    if (top && sameLayer(top, inverse)) {
+      const combined = (moveQuarterAmount(top) + moveQuarterAmount(inverse)) % 4;
+      if (combined === 0) rescueStack.pop();
+      else rescueStack[rescueStack.length - 1] = moveFromQuarterAmount(top.axis, top.layer, combined);
+      return;
+    }
+
+    rescueStack.push(inverse);
+  }
+
+  function cloneMove(move) {
+    return {
+      axis: move.axis,
+      layer: move.layer,
+      sign: move.sign,
+      turns: move.turns || 1,
+    };
+  }
+
+  function cloneMoveList(moves) {
+    return moves.map(cloneMove);
+  }
+
+  function movesEquivalent(a, b) {
+    return sameLayer(a, b) && moveQuarterAmount(a) === moveQuarterAmount(b);
+  }
+
+  function sameLayer(a, b) {
+    return a.axis === b.axis && a.layer === b.layer;
+  }
+
+  function moveQuarterAmount(move) {
+    const signed = (move.sign >= 0 ? 1 : -1) * (move.turns || 1);
+    return ((signed % 4) + 4) % 4;
+  }
+
+  function moveFromQuarterAmount(axis, layer, amount) {
+    const normalized = ((amount % 4) + 4) % 4;
+    return {
+      axis,
+      layer,
+      sign: normalized === 3 ? -1 : 1,
+      turns: normalized === 2 ? 2 : 1,
+    };
+  }
+
+  function invalidateAssistPlan() {
+    assistPlan = [];
+    assistPlanKey = "";
+    solverMode = "idle";
+  }
+
+  function faceletStringFromCubies() {
+    const facelets = Array(54).fill(null);
+
+    for (const cubie of cubies) {
+      for (const sticker of cubie.stickers) {
+        const normal = worldNormalFromSticker(cubie.basis, sticker.key);
+        const face = faceFromNormal(normal);
+        const index = face ? faceletIndex(face, cubie.pos) : -1;
+        const letter = STICKER_LETTERS[sticker.key];
+        if (index < 0 || index >= facelets.length || !letter || facelets[index]) return null;
+        facelets[index] = letter;
+      }
+    }
+
+    if (facelets.some((value) => !value)) return null;
+    const counts = Object.fromEntries(Object.keys(FACE_OFFSETS).map((face) => [face, 0]));
+    facelets.forEach((value) => {
+      counts[value] += 1;
     });
+    if (Object.values(counts).some((count) => count !== 9)) return null;
+    return facelets.join("");
+  }
+
+  function areFacesUniform(facelets) {
+    return Object.values(FACE_OFFSETS).every((offset) => {
+      const faceColor = facelets[offset];
+      for (let index = 1; index < 9; index += 1) {
+        if (facelets[offset + index] !== faceColor) return false;
+      }
+      return true;
+    });
+  }
+
+  function worldNormalFromSticker(basis, key) {
+    const normal = STICKER_NORMALS[key];
+    return [
+      Math.round(basis.x[0] * normal[0] + basis.y[0] * normal[1] + basis.z[0] * normal[2]),
+      Math.round(basis.x[1] * normal[0] + basis.y[1] * normal[1] + basis.z[1] * normal[2]),
+      Math.round(basis.x[2] * normal[0] + basis.y[2] * normal[1] + basis.z[2] * normal[2]),
+    ];
+  }
+
+  function faceFromNormal(normal) {
+    if (normal[1] > 0) return "U";
+    if (normal[0] > 0) return "R";
+    if (normal[2] > 0) return "F";
+    if (normal[1] < 0) return "D";
+    if (normal[0] < 0) return "L";
+    if (normal[2] < 0) return "B";
+    return null;
+  }
+
+  function faceletIndex(face, pos) {
+    const [x, y, z] = pos;
+    let row = 0;
+    let col = 0;
+
+    if (face === "U") {
+      row = z + 1;
+      col = x + 1;
+    } else if (face === "R") {
+      row = 1 - y;
+      col = 1 - z;
+    } else if (face === "F") {
+      row = 1 - y;
+      col = x + 1;
+    } else if (face === "D") {
+      row = 1 - z;
+      col = x + 1;
+    } else if (face === "L") {
+      row = 1 - y;
+      col = z + 1;
+    } else if (face === "B") {
+      row = 1 - y;
+      col = 1 - x;
+    }
+
+    if (row < 0 || row > 2 || col < 0 || col > 2) return -1;
+    return FACE_OFFSETS[face] + row * 3 + col;
+  }
+
+  function isValidCubeJsCube(cube) {
+    return (
+      cube &&
+      isPermutation(cube.center, 6) &&
+      isPermutation(cube.cp, 8) &&
+      isPermutation(cube.ep, 12) &&
+      cube.co.every((value) => Number.isInteger(value) && value >= 0 && value <= 2) &&
+      cube.eo.every((value) => Number.isInteger(value) && value >= 0 && value <= 1)
+    );
+  }
+
+  function isPermutation(values, length) {
+    if (!Array.isArray(values) || values.length !== length) return false;
+    const seen = new Set(values);
+    if (seen.size !== length) return false;
+    for (let i = 0; i < length; i += 1) {
+      if (!seen.has(i)) return false;
+    }
+    return true;
   }
 
   function createProgram(vsSource, fsSource) {
@@ -1275,8 +1617,11 @@
   function updateHud() {
     movesEl.textContent = String(moveCount);
     timerEl.textContent = formatTime(getElapsedMs());
-    undoButton.disabled = history.length === 0 || activeTurn || queue.length || scramblingCount > 0;
-    scrambleButton.disabled = Boolean(activeTurn || queue.length);
+    const locked = Boolean(activeTurn || queue.length || scramblingCount > 0 || solverBusy);
+    undoButton.disabled = history.length === 0 || locked;
+    scrambleButton.disabled = locked;
+    godButton.disabled = locked || isSolved();
+    resetButton.disabled = solverBusy;
   }
 
   function formatTime(ms) {
