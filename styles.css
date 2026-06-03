@@ -350,6 +350,15 @@ button:disabled {
     justify-self: stretch;
   }
 
+  .action-row {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .action-row button {
+    min-width: 0;
+    padding-inline: 8px;
+  }
+
   .settings {
     grid-row: 3;
     justify-self: stretch;
@@ -367,7 +376,10 @@ button:disabled {
     font-size: 8px;
   }
 
+}
+
+@media (max-width: 340px) {
   .action-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
